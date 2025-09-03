@@ -1,0 +1,90 @@
+import streamlit as st
+import fitz  # PyMuPDF
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from huggingface_hub import InferenceClient
+import numpy as np
+import os
+from dotenv import load_dotenv
+
+# ---------------- Load Environment Variables ----------------
+load_dotenv()
+HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+
+# Hugging Face Client
+client = InferenceClient(token=HF_TOKEN)
+
+# ---------------- Embedding Model ----------------
+@st.cache_resource
+def load_embedding_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedding_model = load_embedding_model()
+
+# ---------------- PDF Functions ----------------
+def extract_text_from_pdf(uploaded_file):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text("text")
+    return text
+
+def split_text(text, chunk_size=500):
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+def find_best_answer(query, chunks, embeddings):
+    query_emb = embedding_model.encode([query])
+    similarities = cosine_similarity(query_emb, embeddings)[0]
+    best_idx = np.argmax(similarities)
+    return chunks[best_idx], similarities[best_idx]
+
+# ---------------- Streamlit UI ----------------
+st.title("📘 StudyMate - PDF Q&A Assistant")
+st.write("Upload a PDF, ask a question, and get AI-powered answers using Hugging Face models.")
+
+uploaded_file = st.file_uploader("📂 Upload PDF", type="pdf")
+
+if uploaded_file:
+    text = extract_text_from_pdf(uploaded_file)
+    st.success("✅ PDF uploaded and processed!")
+
+    chunks = split_text(text)
+
+    if len(chunks) == 0:
+        st.error("No text could be extracted from this PDF.")
+    else:
+        embeddings = embedding_model.encode(chunks)
+        embeddings = np.array(embeddings)
+
+        query = st.text_input("💡 Ask a question about your PDF:")
+
+        if query:
+            best_chunk, score = find_best_answer(query, chunks, embeddings)
+
+            prompt = f"""
+You are an AI assistant. Use the following context from a PDF to answer the question clearly.
+
+Context:
+{best_chunk}
+
+Question: {query}
+Answer:
+"""
+
+            inputs = {
+                "past_user_inputs": [],
+                "generated_responses": [],
+                "text": prompt
+            }
+
+            response = client.conversational(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                inputs=inputs,
+                max_new_tokens=200,
+                temperature=0.7,
+            )
+
+            st.subheader("📌 AI Answer:")
+            st.write(response.generated_text)
+
+            st.caption(f"🔍 Best chunk similarity score: {score:.2f}")
